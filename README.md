@@ -1,5 +1,14 @@
 # Streamlining insurance claims with OpenShift AI
 
+## Deprecation warning
+
+These materials are no longer being updated. 
+
+You should refer to https://github.com/rh-aiservices-bu/parasol-insurance for their next iteration. 
+
+<br><br><br><br><br><br><br><br><br>
+
+
 ## Introduction
 
 This repository contains the code, instructions, resources and materials associated with the Lab called **Streamlining insurance claims with OpenShift AI**.
