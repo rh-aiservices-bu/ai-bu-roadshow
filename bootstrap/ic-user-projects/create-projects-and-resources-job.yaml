@@ -4,7 +4,7 @@ metadata:
   name: create-and-apply-resources
   namespace: ic-user-projects
   annotations:
-    argocd.argoproj.io/sync-wave: "2"
+    argocd.argoproj.io/sync-wave: "1"
     argocd.argoproj.io/hook: Sync
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
     argocd.argoproj.io/compare-options: IgnoreExtraneous
@@ -24,7 +24,6 @@ spec:
         - |-
           # Get user count
           user_count=$(oc get namespaces | grep showroom | wc -l)
-          USER_BATCH_SIZE=5
 
           echo -n 'Waiting for minio-root-user secret'
           while [ -z "\$(oc get secret -n ic-shared-minio minio-root-user -oname 2>/dev/null)" ]; do
@@ -46,10 +45,12 @@ spec:
           DASHBOARD_ROUTE=https://$(oc get route rhods-dashboard -n redhat-ods-applications -o jsonpath='{.spec.host}')
 
           # Define some variables
+          WORKBENCH_NAME_ILAB="my-workbench-ilab"
+          WORKBENCH_IMAGE_ILAB="ic-workbench-ilab:0.21.0"
           WORKBENCH_NAME="my-workbench"
           WORKBENCH_IMAGE="ic-workbench:1.2"
           PIPELINE_ENGINE="Argo"
-          BRANCH_NAME="main-rhoai-2.13"
+          BRANCH_NAME="dev"
 
           for i in $(seq 1 $user_count);
           do
@@ -160,6 +161,7 @@ spec:
                     echo "Minio pass: $MINIO_ROOT_PASSWORD"
                     echo "Minio route: $MINIO_HOST"
                     cat << EOF | oc apply -f-
+                    ---
                     apiVersion: v1
                     kind: Secret
                     metadata:
@@ -177,6 +179,24 @@ spec:
                       AWS_DEFAULT_REGION: us
                       AWS_S3_ENDPOINT: $MINIO_HOST
                       AWS_S3_BUCKET: $USER_NAME
+                    ---
+                    apiVersion: v1
+                    kind: Secret
+                    metadata:
+                      name: aws-connection-shared-minio---model
+                      labels:
+                        opendatahub.io/dashboard: "true"
+                        opendatahub.io/managed: "true"
+                      annotations:
+                        opendatahub.io/connection-type: s3
+                        openshift.io/display-name: Shared Minio - model
+                    type: Opaque
+                    stringData:
+                      AWS_ACCESS_KEY_ID: $MINIO_ROOT_USER
+                      AWS_SECRET_ACCESS_KEY: $MINIO_ROOT_PASSWORD
+                      AWS_DEFAULT_REGION: us
+                      AWS_S3_ENDPOINT: http://minio.ic-shared-minio.svc:9000
+                      AWS_S3_BUCKET: granite
                     EOF
                   command:
                   - /bin/bash
@@ -329,7 +349,7 @@ spec:
           metadata:
             annotations:
               notebooks.opendatahub.io/inject-oauth: 'true'
-              opendatahub.io/image-display-name: CUSTOM - Parasol Insurance Claim Processing Lab Workbench
+              opendatahub.io/image-display-name: CUSTOM - Insurance Claim Processing Lab Workbench
               notebooks.opendatahub.io/oauth-logout-url: >-
                 $DASHBOARD_ROUTE/projects/$USER_PROJECT?notebookLogout=$WORKBENCH_NAME
               opendatahub.io/accelerator-name: ''
@@ -492,6 +512,206 @@ spec:
                       defaultMode: 420
                       secretName: $WORKBENCH_NAME-tls
             readyReplicas: 1
+          
+          EOF
+          # Create the workbench PVC
+          cat << EOF | oc apply -f-
+          kind: PersistentVolumeClaim
+          apiVersion: v1
+          metadata:
+            annotations:
+              openshift.io/description: ''
+              openshift.io/display-name: iLab Workbench
+              volume.beta.kubernetes.io/storage-provisioner: openshift-storage.rbd.csi.ceph.com
+              volume.kubernetes.io/storage-provisioner: openshift-storage.rbd.csi.ceph.com
+            name: $WORKBENCH_NAME_ILAB
+            namespace: $USER_PROJECT
+            finalizers:
+              - kubernetes.io/pvc-protection
+            labels:
+              opendatahub.io/dashboard: 'true'
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            resources:
+              requests:
+                storage: 50Gi
+            storageClassName: ocs-storagecluster-ceph-rbd
+            volumeMode: Filesystem
+          EOF
+
+          # Create the workbench
+          cat << EOF | oc apply -f-
+          apiVersion: kubeflow.org/v1
+          kind: Notebook
+          metadata:
+            annotations:
+              notebooks.opendatahub.io/inject-oauth: 'true'
+              opendatahub.io/image-display-name: CUSTOM - InstructLab
+              notebooks.opendatahub.io/oauth-logout-url: >-
+                $DASHBOARD_ROUTE/projects/$USER_PROJECT?notebookLogout=$WORKBENCH_NAME_ILAB
+              opendatahub.io/accelerator-name: ''
+              openshift.io/description: ''
+              openshift.io/display-name: InstructLab
+              notebooks.opendatahub.io/last-image-selection: '$WORKBENCH_IMAGE_ILAB'
+              notebooks.opendatahub.io/last-size-selection: Standard
+              opendatahub.io/username: $USER_NAME
+            name: $WORKBENCH_NAME_ILAB
+            namespace: $USER_PROJECT
+            labels:
+              app: $WORKBENCH_NAME_ILAB
+              opendatahub.io/dashboard: 'true'
+              opendatahub.io/odh-managed: 'true'
+              opendatahub.io/user: $USER_NAME
+          spec:
+            template:
+              spec:
+                affinity: {}
+                containers:
+                  - resources:
+                      limits:
+                        cpu: '8'
+                        memory: 12Gi
+                        nvidia.com/gpu: "1"
+                      requests:
+                        cpu: '4'
+                        memory: 10Gi
+                        nvidia.com/gpu: "1"
+                    readinessProbe:
+                      failureThreshold: 3
+                      httpGet:
+                        path: /notebook/$USER_PROJECT/$WORKBENCH_NAME_ILAB/api
+                        port: notebook-port
+                        scheme: HTTP
+                      initialDelaySeconds: 10
+                      periodSeconds: 5
+                      successThreshold: 1
+                      timeoutSeconds: 1
+                    name: $WORKBENCH_NAME
+                    livenessProbe:
+                      failureThreshold: 3
+                      httpGet:
+                        path: /notebook/$USER_PROJECT/$WORKBENCH_NAME_ILAB/api
+                        port: notebook-port
+                        scheme: HTTP
+                      initialDelaySeconds: 10
+                      periodSeconds: 5
+                      successThreshold: 1
+                      timeoutSeconds: 1
+                    env:
+                      - name: NOTEBOOK_ARGS
+                        value: |-
+                          --ServerApp.port=8888
+                                            --ServerApp.token=''
+                                            --ServerApp.password=''
+                                            --ServerApp.base_url=/notebook/$USER_PROJECT/$WORKBENCH_NAME_ILAB
+                                            --ServerApp.quit_button=False
+                                            --ServerApp.tornado_settings={"user":"$USER_NAME","hub_host":"$DASHBOARD_ROUTE","hub_prefix":"/projects/$USER_PROJECT"}
+                      - name: JUPYTER_IMAGE
+                        value: >-
+                          image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/$WORKBENCH_IMAGE_ILAB
+                    ports:
+                      - containerPort: 8888
+                        name: notebook-port
+                        protocol: TCP
+                    imagePullPolicy: Always
+                    volumeMounts:
+                      - mountPath: /opt/app-root/src
+                        name: $WORKBENCH_NAME_ILAB
+                      - mountPath: /opt/app-root/runtimes
+                        name: elyra-dsp-details
+                      - mountPath: /dev/shm
+                        name: shm
+                    image: >-
+                      image-registry.openshift-image-registry.svc:5000/redhat-ods-applications/$WORKBENCH_IMAGE_ILAB
+                    workingDir: /opt/app-root/src
+                  - resources:
+                      limits:
+                        cpu: 100m
+                        memory: 64Mi
+                      requests:
+                        cpu: 100m
+                        memory: 64Mi
+                    readinessProbe:
+                      failureThreshold: 3
+                      httpGet:
+                        path: /oauth/healthz
+                        port: oauth-proxy
+                        scheme: HTTPS
+                      initialDelaySeconds: 5
+                      periodSeconds: 5
+                      successThreshold: 1
+                      timeoutSeconds: 1
+                    name: oauth-proxy
+                    livenessProbe:
+                      failureThreshold: 3
+                      httpGet:
+                        path: /oauth/healthz
+                        port: oauth-proxy
+                        scheme: HTTPS
+                      initialDelaySeconds: 30
+                      periodSeconds: 5
+                      successThreshold: 1
+                      timeoutSeconds: 1
+                    env:
+                      - name: NAMESPACE
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.namespace
+                    ports:
+                      - containerPort: 8443
+                        name: oauth-proxy
+                        protocol: TCP
+                    imagePullPolicy: Always
+                    volumeMounts:
+                      - mountPath: /etc/oauth/config
+                        name: oauth-config
+                      - mountPath: /etc/tls/private
+                        name: tls-certificates
+                    image: >-
+                      registry.redhat.io/openshift4/ose-oauth-proxy@sha256:4bef31eb993feb6f1096b51b4876c65a6fb1f4401fee97fa4f4542b6b7c9bc46
+                    args:
+                      - '--provider=openshift'
+                      - '--https-address=:8443'
+                      - '--http-address='
+                      - '--openshift-service-account=$WORKBENCH_NAME_ILAB'
+                      - '--cookie-secret-file=/etc/oauth/config/cookie_secret'
+                      - '--cookie-expire=24h0m0s'
+                      - '--tls-cert=/etc/tls/private/tls.crt'
+                      - '--tls-key=/etc/tls/private/tls.key'
+                      - '--upstream=http://localhost:8888'
+                      - '--upstream-ca=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt'
+                      - '--email-domain=*'
+                      - '--skip-provider-button'
+                      - >-
+                        --openshift-sar={"verb":"get","resource":"notebooks","resourceAPIGroup":"kubeflow.org","resourceName":"$WORKBENCH_IMAGE_ILAB","namespace":"$USER_PROJECT"}
+                      - >-
+                        --logout-url=$DASHBOARD_ROUTE/projects/$USER_PROJECT?notebookLogout=$WORKBENCH_IMAGE_ILAB
+                enableServiceLinks: false
+                serviceAccountName: $WORKBENCH_NAME_ILAB
+                tolerations:
+                  - effect: NoSchedule
+                    key: notebooksonly
+                    operator: Exists
+                volumes:
+                  - name: $WORKBENCH_NAME_ILAB
+                    persistentVolumeClaim:
+                      claimName: $WORKBENCH_NAME_ILAB
+                  - name: elyra-dsp-details
+                    secret:
+                      secretName: ds-pipeline-config
+                  - emptyDir:
+                      medium: Memory
+                    name: shm
+                  - name: oauth-config
+                    secret:
+                      defaultMode: 420
+                      secretName: $WORKBENCH_NAME-oauth-config
+                  - name: tls-certificates
+                    secret:
+                      defaultMode: 420
+                      secretName: $WORKBENCH_NAME-tls
+            readyReplicas: 1
           EOF
 
           # Git clone job
@@ -502,7 +722,7 @@ spec:
             name: clone-repo
             namespace: $USER_PROJECT
           spec:
-            backoffLimit: 4
+            backoffLimit: 20
             template:
               spec:
                 serviceAccount: demo-setup
@@ -515,6 +735,7 @@ spec:
                   args:
                   - -ec
                   - |-
+                    sleep 3m
                     echo -n "Waiting for workbench pod in $USER_PROJECT namespace"
                     while [ -z "\$(oc get pods -n $USER_PROJECT -l app=$WORKBENCH_NAME -o custom-columns=STATUS:.status.phase --no-headers | grep Running 2>/dev/null)" ]; do
                         echo -n '.'
@@ -529,63 +750,11 @@ spec:
                   args:
                   - -ec
                   - |-
-                    pod_name=\$(oc get pods --selector=app=$WORKBENCH_NAME -o jsonpath='{.items[0].metadata.name}') && oc exec \$pod_name -- bash -c "git clone https://github.com/rh-aiservices-bu/parasol-insurance && cd parasol-insurance && git checkout $BRANCH_NAME"
+                    pod_name=\$(oc get pods --selector=app=$WORKBENCH_NAME -o jsonpath='{.items[0].metadata.name}') && oc exec \$pod_name -- bash -c "git clone https://github.com/cnuland/parasol-insurance && cd parasol-insurance && git checkout $BRANCH_NAME"
                 restartPolicy: Never
           EOF
 
-          # Create the Data Pipeline PVC
-          cat << EOF | oc apply -f-
-          kind: PersistentVolumeClaim
-          apiVersion: v1
-          metadata:
-            annotations:
-              openshift.io/description: ''
-              openshift.io/display-name: Data Pipeline
-              volume.beta.kubernetes.io/storage-provisioner: openshift-storage.cephfs.csi.ceph.com
-              volume.kubernetes.io/storage-provisioner: openshift-storage.cephfs.csi.ceph.com
-            name: processing-pipeline-storage
-            namespace: $USER_PROJECT
-            finalizers:
-              - kubernetes.io/pvc-protection
-            labels:
-              opendatahub.io/dashboard: 'true'
-          spec:
-            accessModes:
-              - ReadWriteMany
-            resources:
-              requests:
-                storage: 1Gi
-            storageClassName: ocs-storagecluster-cephfs
-            volumeMode: Filesystem
-          EOF
-
-          # Create the ArgoCD Project
-          cat << EOF | oc apply -f-
-          apiVersion: argoproj.io/v1alpha1
-          kind: AppProject
-          metadata:
-            name: project-$USER_PROJECT
-            namespace: openshift-gitops
-          spec:
-            description: Application project for $USER_PROJECT
-            destinations:
-              - name: in-cluster
-                namespace: $USER_PROJECT
-                server: 'https://kubernetes.default.svc'
-            roles:
-              - description: Sync privileges for any application
-                groups:
-                  - $USER_PROJECT
-                name: ci-role
-                policies:
-                  - 'p, proj:project-$USER_PROJECT:ci-role, applications, *, project-$USER_PROJECT/*, allow'
-            sourceRepos:
-              - 'https://github.com/rh-aiservices-bu/parasol-insurance.git'
-          EOF
-
-          if (( i % USER_BATCH_SIZE == 0 )); then
-            sleep 20
-          fi
+          sleep 20
           
           done
       restartPolicy: Never
