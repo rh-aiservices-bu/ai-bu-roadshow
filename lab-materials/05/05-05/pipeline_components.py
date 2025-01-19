@@ -18,9 +18,9 @@ def initialize():
             '-c', 
             '''cd /shared-data
             rm -r * 2>/dev/null
-            git clone https://github.com/rh-aiservices-bu/parasol-insurance
+            git clone https://github.com/rh-aiservices-bu/ai-bu-roadshow
             cd parasol-insurance
-            git checkout main-rhoai-2.13
+            git checkout main
             ls
             ''',
         ],
