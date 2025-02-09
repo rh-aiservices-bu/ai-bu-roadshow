@@ -16,4 +16,4 @@ resources:
   - odhdashboardconfig.yaml
   - accelerator-profile.yaml
   # wave 2
-  - images-puller.yaml
+  - image-puller.yaml
